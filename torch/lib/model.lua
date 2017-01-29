@@ -346,8 +346,10 @@ function torch.defineModelGraph(conf, mconf, data)
   -- Manta may have p in some unknown units.
   -- Therefore we should apply a constant scale to p in order to
   -- correct U (recall U = UDiv - grad(p)).
-  local pScaled = nn.Mul()(p):annotate{name = 'pMul'}
-  local U = tfluids.VelocityUpdate()({pScaled, UDiv, flags})
+  -- local pScaled = nn.Mul()(p):annotate{name = 'pMul'}
+  -- EDIT(tompson Jan 30 2017): no longer needed now we match Manta.  Needlessly
+  -- adds a nullspace to the MSE error manifold (i.e. arbitrary scale).
+  local U = tfluids.VelocityUpdate()({p, UDiv, flags})
   U:annotate{name = 'UPred'}
 
   -- Now we need to UNDO the scale factor we applied on the input.

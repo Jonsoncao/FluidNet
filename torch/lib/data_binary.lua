@@ -53,99 +53,103 @@ function DataBinary:__init(conf, prefix)
 
     assert(#files == #divFiles,
            "Main file count not equal to divergence file count")
-    assert(#files > conf.ignoreFrames, 'Not enough files in sub-dir ' .. runDir)
-
-    -- Ignore the first n frames.
-    local runFiles = {}
-    local runFilesDivergence = {}
-    for f = conf.ignoreFrames + 1, #files do
-      runFiles[#runFiles + 1] = files[f]
-      runFilesDivergence[#runFilesDivergence + 1] = divFiles[f]
-    end
-    assert(#runFiles == #runFilesDivergence)
-
-    local data = {}
-    for f = 1, #runFiles do
-      collectgarbage()
-      local p, U, flags, density, is3D =
-          torch.loadMantaFile(runFiles[f])
-      local pDiv, UDiv, flagsDiv, densityDiv, is3DDiv =
-          torch.loadMantaFile(runFilesDivergence[f])
-      -- The flags shouldn't change.
-      assert(torch.all(torch.eq(flags, flagsDiv)), 'ERROR: Flags changed!')
-      assert(is3D == is3DDiv, '3D flag is inconsistent!')
-
-      if data.p == nil then
-        -- Initialize the data structure.
-        local xdim = p:size(5)
-        local ydim = p:size(4)
-        local zdim = p:size(3)
-        local nuchans = U:size(2)
-        assert(UDiv:size(2) == nuchans)
-        if not is3D then
-          assert(zdim == 1, '2D domains should have unary z-dimension')
-          assert(nuchans == 2, '2D domains should have 2D velocity')
-        else
-          assert(nuchans == 3, '3D domains should have 3D velocity')
-        end
-        data.p = torch.FloatTensor(#runFiles, 1, zdim, ydim, xdim)
-        data.flags = torch.FloatTensor(#runFiles, 1, zdim, ydim, xdim)
-        data.U = torch.FloatTensor(#runFiles, nuchans, zdim, ydim, xdim)
-        data.density = torch.FloatTensor(#runFiles, 1, zdim, ydim, xdim)
-        data.pDiv = torch.FloatTensor(#runFiles, 1, zdim, ydim, xdim)
-        data.UDiv = torch.FloatTensor(#runFiles, nuchans, zdim, ydim, xdim)
-        data.densityDiv = torch.FloatTensor(#runFiles, 1, zdim, ydim, xdim)
-        data.is3D = is3D
-      else
-        assert(is3D == data.is3D, 'inconsistent 3D flags across run files')
-      end
-
-      -- We could be pedantic here and start checking that the sizes of all
-      -- files match, but instead just let the copy fail if numel doesn't match
-      -- and assume the dims do.
-      data.p[f]:copy(p)
-      data.density[f]:copy(density)
-      data.flags[f]:copy(flags)
-      data.U[f]:copy(U)
-      data.pDiv[f]:copy(pDiv)
-      data.UDiv[f]:copy(UDiv)
-      data.densityDiv[f]:copy(densityDiv)
-    end
-
-    local xdim = data.p:size(5)
-    local ydim = data.p:size(4)
-    local zdim = data.p:size(3)
-    local is3D = data.is3D
-
-    -- Unfortunately, some samples might be the result of an unstable Manta sim.
-    -- i.e. the divergence blew up, but not completely. If this is the
-    -- case, then we should ignore the entire run. So we need to check the
-    -- divergence of the target velocity.
-    local divTarget = divNet:forward({data.U, data.flags})
-    local maxDiv = divTarget:max()
-    if maxDiv > DIV_THRESHOLD then
-      print('WARNING: run ' .. runDirs[i] .. ' (i = ' .. i ..
-            ') has a sample with max(div) = ' .. maxDiv ..
-            ' which is above the allowable threshold (' .. DIV_THRESHOLD .. ')')
-      print('  --> Removing run from the dataset...')
+    if #files <= conf.ignoreFrames then
+      print('WARNING: Not enough files in sub-dir ' .. runDir)
+      print('  skipping it')
     else
-      -- This sample is OK.
-      
-      -- For 3D data it's too much data to store, so we have to catch the
-      -- data on disk and read it back in on demand. This then means we'll
-      -- need an asynchronous mechanism for loading data to hide the load
-      -- latency.
-      self:_cacheDataToDisk(data, conf, runDirs[i])
-      data = nil  -- No longer need it (it's cached on disk).
-
-      self.runs[#self.runs + 1] = {
-        dir = runDirs[i],
-        ntimesteps = #runFiles,
-        xdim = xdim,
-        ydim = ydim,
-        zdim = zdim,
-        is3D = is3D
-      }
+      -- Ignore the first n frames.
+      local runFiles = {}
+      local runFilesDivergence = {}
+      for f = conf.ignoreFrames + 1, #files do
+        runFiles[#runFiles + 1] = files[f]
+        runFilesDivergence[#runFilesDivergence + 1] = divFiles[f]
+      end
+      assert(#runFiles == #runFilesDivergence)
+  
+      local data = {}
+      for f = 1, #runFiles do
+        collectgarbage()
+        local p, U, flags, density, is3D =
+            torch.loadMantaFile(runFiles[f])
+        local pDiv, UDiv, flagsDiv, densityDiv, is3DDiv =
+            torch.loadMantaFile(runFilesDivergence[f])
+        -- The flags shouldn't change.
+        assert(torch.all(torch.eq(flags, flagsDiv)), 'ERROR: Flags changed!')
+        assert(is3D == is3DDiv, '3D flag is inconsistent!')
+  
+        if data.p == nil then
+          -- Initialize the data structure.
+          local xdim = p:size(5)
+          local ydim = p:size(4)
+          local zdim = p:size(3)
+          local nuchans = U:size(2)
+          assert(UDiv:size(2) == nuchans)
+          if not is3D then
+            assert(zdim == 1, '2D domains should have unary z-dimension')
+            assert(nuchans == 2, '2D domains should have 2D velocity')
+          else
+            assert(nuchans == 3, '3D domains should have 3D velocity')
+          end
+          data.p = torch.FloatTensor(#runFiles, 1, zdim, ydim, xdim)
+          data.flags = torch.FloatTensor(#runFiles, 1, zdim, ydim, xdim)
+          data.U = torch.FloatTensor(#runFiles, nuchans, zdim, ydim, xdim)
+          data.density = torch.FloatTensor(#runFiles, 1, zdim, ydim, xdim)
+          data.pDiv = torch.FloatTensor(#runFiles, 1, zdim, ydim, xdim)
+          data.UDiv = torch.FloatTensor(#runFiles, nuchans, zdim, ydim, xdim)
+          data.densityDiv = torch.FloatTensor(#runFiles, 1, zdim, ydim, xdim)
+          data.is3D = is3D
+        else
+          assert(is3D == data.is3D, 'inconsistent 3D flags across run files')
+        end
+  
+        -- We could be pedantic here and start checking that the sizes of all
+        -- files match, but instead just let the copy fail if numel doesn't
+        -- match and assume the dims do.
+        data.p[f]:copy(p)
+        data.density[f]:copy(density)
+        data.flags[f]:copy(flags)
+        data.U[f]:copy(U)
+        data.pDiv[f]:copy(pDiv)
+        data.UDiv[f]:copy(UDiv)
+        data.densityDiv[f]:copy(densityDiv)
+      end
+  
+      local xdim = data.p:size(5)
+      local ydim = data.p:size(4)
+      local zdim = data.p:size(3)
+      local is3D = data.is3D
+  
+      -- Unfortunately, some samples might be the result of an unstable Manta
+      -- sim. i.e. the divergence blew up, but not completely. If this is the
+      -- case, then we should ignore the entire run. So we need to check the
+      -- divergence of the target velocity.
+      local divTarget = divNet:forward({data.U, data.flags})
+      local maxDiv = divTarget:max()
+      if maxDiv > DIV_THRESHOLD then
+        print('WARNING: run ' .. runDirs[i] .. ' (i = ' .. i ..
+              ') has a sample with max(div) = ' .. maxDiv ..
+              ' which is above the allowable threshold (' .. DIV_THRESHOLD ..
+              ')')
+        print('  --> Removing run from the dataset...')
+      else
+        -- This sample is OK.
+        
+        -- For 3D data it's too much data to store, so we have to catch the
+        -- data on disk and read it back in on demand. This then means we'll
+        -- need an asynchronous mechanism for loading data to hide the load
+        -- latency.
+        self:_cacheDataToDisk(data, conf, runDirs[i])
+        data = nil  -- No longer need it (it's cached on disk).
+  
+        self.runs[#self.runs + 1] = {
+          dir = runDirs[i],
+          ntimesteps = #runFiles,
+          xdim = xdim,
+          ydim = ydim,
+          zdim = zdim,
+          is3D = is3D
+        }
+      end
     end
   end
   runDirs = nil  -- Full set no longer needed.

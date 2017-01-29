@@ -22,7 +22,6 @@
 -- Or to test everything:
 -- qlua -ltfluids -e "tfluids.test()"
 
-local cutorch = require('cutorch')
 local nn = require('nn')
 local paths = require('paths')
 local sys = require('sys')
@@ -68,6 +67,11 @@ end
 -- arguments are inputs.
 local function profileAndTestCuda(func, name, args, resultArgs,
                                   resizeForProfile)
+  if not tfluids.withCUDA then
+    print('WARNING: tfluids compiled without cuda. Not testing.')
+    return
+  end
+  local cutorch = require('cutorch')
   if resizeForProfile == nil then
     resizeForProfile = true
   end
@@ -118,16 +122,6 @@ local function profileAndTestCuda(func, name, args, resultArgs,
       local err = argsInCPU[key] - argsInGPU[key]:float()
       mytester:assertlt(err:abs():max(), precisionCPUGPU,
                         'Error CPU:GPU mismatch: ' .. name .. ', arg # ' .. key)
-      -- TEMP CODE
-      if err:abs():max() > precisionCPUGPU then
-        print('CPU Val')
-        print(argsInCPU[key][{1, 1, 1, {1, 6}, {1, 6}}])
-        print('GPU Val')
-        print(argsInGPU[key][{1, 1, 1, {1, 6}, {1, 6}}])
-        print('err')
-        print(err[{1, 1, 1, {1, 6}, {1, 6}}])
-      end
-      -- END TEMP CODE
     else
       -- This is pedantic, but do it anyway.
       mytester:assert(argsInCPU[key] == argsInGPU[key])
@@ -714,16 +708,18 @@ function test.VolumetricUpSamplingNearest()
   local gradInput = module:backward(input, gradOutput):clone()
 
   -- Perform the function on the GPU.
-  module:cuda()
-  local inputGPU = input:cuda()
-  local outputGPU = module:forward(inputGPU):double()
-  mytester:assertle((output - outputGPU):abs():max(), precision,
-                    'error on GPU fprop')
+  if tfluids.withCUDA then
+    module:cuda()
+    local inputGPU = input:cuda()
+    local outputGPU = module:forward(inputGPU):double()
+    mytester:assertle((output - outputGPU):abs():max(), precision,
+                      'error on GPU fprop')
 
-  local gradInputGPU =
-      module:backward(inputGPU, gradOutput:cuda()):double()
-  mytester:assertlt((gradInput - gradInputGPU):abs():max(), precision * 10,
-                    'error on GPU bprop')
+    local gradInputGPU =
+        module:backward(inputGPU, gradOutput:cuda()):double()
+    mytester:assertlt((gradInput - gradInputGPU):abs():max(), precision * 10,
+                      'error on GPU bprop')
+  end
 
   -- Check BPROP is correct.
   module:double()
@@ -748,27 +744,189 @@ function test.VolumetricUpSamplingNearest()
                      {ratio, input, gradOutput, gradInput}, {4}, false)
 end
 
+function test.rectangularBlur()
+  for dim = 2, 3 do
+    local nbatch = torch.random(1, 3)
+    local nchan = 3
+    local zsize = 1
+    if dim == 3 then
+      zsize = 64
+    end
+    ysize = 65
+    xsize = 66
+
+    local blurRad = torch.random(1, 4)
+
+    local src = torch.Tensor(nbatch, nchan, zsize, ysize, xsize):uniform(0, 1)
+    local dst = src:clone():uniform(0, 1)  -- Fill it with random stuff.
+    local is3D = dim == 3
+
+    tfluids.rectangularBlur(src, blurRad, is3D, dst)
+
+    -- Now use a Spatial/VolumetricConvolution stage to replicate the same.
+    -- Our blur kernel clamps the edge values, we should do the same.
+    local k = blurRad * 2 + 1
+    local mod
+    if dim == 2 then
+      mod = nn.SpatialConvolution(1, 1, k, k, 1, 1)  -- fin, fout, kW/H, dW/H
+    else
+      mod = nn.VolumetricConvolution(1, 1, k, k, k, 1, 1, 1)
+    end
+    mod.weight:fill(1):div(mod.weight:sum())
+    mod.bias:fill(0)
+    
+    local pad = k - 1
+    
+    local srcPad
+    if dim == 2 then
+      srcPad = torch.Tensor(nbatch, nchan, zsize, ysize + pad, xsize + pad)
+    else
+      srcPad = torch.Tensor(nbatch, nchan, zsize + pad, ysize + pad,
+                            xsize + pad)
+    end
+    for z = 1, srcPad:size(3) do
+      local zsrc = math.min(math.max(z - pad / 2, 1), src:size(3))
+      for y = 1, srcPad:size(4) do
+        local ysrc = math.min(math.max(y - pad / 2, 1), src:size(4))
+        for x = 1, srcPad:size(5) do
+          local xsrc = math.min(math.max(x - pad / 2, 1), src:size(5))
+          srcPad[{{}, {}, z, y, x}]:copy(src[{{}, {}, zsrc, ysrc, xsrc}])
+        end
+      end
+    end
+    local dstGT = dst:clone():uniform(0, 1)
+    for i = 1, nchan do
+      if dim == 2 then
+        dstGT[{{}, i}]:copy(mod:forward(srcPad[{{}, {i}, 1, {}, {}}]))
+      else
+        dstGT[{{}, i}]:copy(mod:forward(srcPad[{{}, {i}, {}, {}, {}}]))
+      end
+    end
+
+    mytester:assertlt((dst - dstGT):abs():max(), precision, 'blur error')
+  end
+end
+
+function test.signedDistanceField()
+  for dim = 2, 3 do
+    local batchSize = torch.random(1, 5)
+    local widthIn = torch.random(16, 32)
+    local heightIn = torch.random(16, 32)
+    local depthIn = torch.random(16, 32)
+    local searchRad = torch.random(1, 5)
+
+    if dim == 2 then
+      depthIn = 1
+    end
+
+    local flags = torch.rand(batchSize, 1, depthIn, heightIn, widthIn)
+    -- Turn it into a {0, TypeObstacle} grid.
+    flags = flags:gt(0.8):double():mul(tfluids.CellType.TypeObstacle)
+    local dist = flags:clone():uniform(0, 1)
+    local is3D = dim == 3
+
+    tfluids.signedDistanceField(flags, searchRad, is3D, dist)
+  
+    -- Make sure the distances are correct.
+    -- This is a pretty dumb test. It's just a reimplementation of the same code
+    -- in lua.
+    local obs = tfluids.CellType.TypeObstacle
+    local distGT = dist:clone():uniform(0, 1)
+    for b = 1, flags:size(1) do
+      for z = 1, flags:size(3) do
+        for y = 1, flags:size(4) do
+          for x = 1, flags:size(5) do
+            if flags[{b, 1, z, y, x}] == obs then
+              distGT[{b, 1, z, y, x}] = 0
+            else
+              local distSq = searchRad * searchRad
+              local zStart = math.max(1, z - searchRad)
+              local zEnd = math.min(depthIn, z + searchRad)
+              local yStart = math.max(1, y - searchRad)
+              local yEnd = math.min(heightIn, y + searchRad)
+              local xStart = math.max(1, x - searchRad)
+              local xEnd = math.min(widthIn, x + searchRad)
+              for zoff = zStart, zEnd do
+                for yoff = yStart, yEnd do
+                  for xoff = xStart, xEnd do
+                    if flags[{b, 1, zoff, yoff, xoff}] == obs then
+                      curDistSq = ((z - zoff) * (z - zoff) +  
+                                   (y - yoff) * (y - yoff) +
+                                   (x - xoff) * (x - xoff))
+                      if curDistSq < distSq then
+                        distSq = curDistSq
+                      end
+                    end
+                  end
+                end
+              end
+              distGT[{b, 1, z, y, x}] = math.sqrt(distSq)
+            end
+          end
+        end
+      end
+    end
+    local err = dist - distGT
+    mytester:assertlt(err:abs():max(), precision, 'signedDistanceField error')
+
+    -- Now test another flags grid, with a known (and easy) solution.
+    -- Generate a bunch of single points in the flags grid.
+    flags:fill(tfluids.CellType.TypeFluid)
+    local npnts = 4
+    local pntPos = {}
+    for b = 1, batchSize do
+      pntPos[b] = {}
+      for i = 1, npnts do
+        local pos =  torch.Tensor({torch.random(1, widthIn),
+                                   torch.random(1, heightIn),
+                                   torch.random(1, depthIn)})
+        pntPos[b][i] = pos
+        flags[{b, 1, pos[3], pos[2], pos[1]}] = tfluids.CellType.TypeObstacle
+      end
+    end
+    -- Calculate what the GT output should be.
+    for b = 1, flags:size(1) do
+      for z = 1, flags:size(3) do
+        for y = 1, flags:size(4) do
+          for x = 1, flags:size(5) do
+            local dist = searchRad
+            for i = 1, npnts do
+              local delta = torch.Tensor({x, y, z}) - pntPos[b][i]
+              local cur_dist = delta:norm()
+              if cur_dist < dist then
+                dist = cur_dist
+              end
+            end
+            distGT[{b, 1, z, y, x}] = dist
+          end
+        end
+      end
+    end
+    -- Now test this against the tfluids function.
+    tfluids.signedDistanceField(flags, searchRad, is3D, dist)
+    err = dist - distGT
+    mytester:assertlt(err:abs():max(), precision, 'signedDistanceField error 2')
+
+    -- Now profile and test GPU version.
+    profileAndTestCuda(tfluids.signedDistanceField,
+                       'signedDistanceField dim ' .. dim,
+                       {flags, searchRad, is3D, dist}, {4})
+  end
+end
+
 -- Now run the test above
 mytester:add(test)
 
-function tfluids.test(tests, seed, gpuDevice)
+function tfluids.test(tests, seed)
   dofile('../lib/ls.lua')
   dofile('../lib/load_manta_file.lua')  -- For torch.loadMantaFile()
   dofile('../lib/modules/inject_tensor.lua')
-
-  local curDevice = cutorch.getDevice()
-  -- By default don't test on the primary device.
-  gpuDevice = gpuDevice or 1
-  cutorch.setDevice(gpuDevice)
-  print('Testing on gpu device ' .. gpuDevice)
-  print(cutorch.getDeviceProperties(gpuDevice))
 
   -- randomize stuff.
   local seed = seed or (1e5 * torch.tic())
   print('Seed: ', seed)
   math.randomseed(seed)
   torch.manualSeed(seed)
-  cutorch.manualSeed(seed)
   mytester:run(tests)
 
   numTimes = 0
@@ -776,7 +934,7 @@ function tfluids.test(tests, seed, gpuDevice)
     numTimes = numTimes + 1
   end
 
-  if numTimes > 0 then
+  if numTimes > 1 then
     print ''
     print('-----------------------------------------------------------------' ..
           '-------------')
@@ -793,8 +951,6 @@ function tfluids.test(tests, seed, gpuDevice)
     print('-----------------------------------------------------------------' ..
           '-------------')
   end
-
-  cutorch.setDevice(curDevice)
 
   return mytester
 end

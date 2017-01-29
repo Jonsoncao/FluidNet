@@ -1629,6 +1629,194 @@ static int tfluids_(Main_volumetricUpSamplingNearestBackward)(lua_State *L) {
 }
 
 // *****************************************************************************
+// rectangularBlur
+// *****************************************************************************
+
+// This is a convolution with a rectangular kernel where we treat the kernel as
+// an impulse train. It decouples the blur kernel size to the runtime
+// resulting in an O(npix) transform (very fast even for massive kernels sizes).
+static inline void DoRectangularBlurAlongAxis(
+    const real* src, const int32_t size, const int32_t stride,
+    const int32_t rad, real* dst) {
+  // Initialize with the sum of the first pixel rad + 1 times.
+  real val = src[0] * static_cast<real>(rad + 1);
+  // Now accumulate the first rad - 1 elements. These two contributions
+  // effectively start with the center pixel at i = -1, where we clamp the
+  // edge values.
+  for (int32_t i = 0; i < size && i < rad; i++) {
+    val += src[i * stride];
+  }
+
+  // Now beging the algorithm.
+  const real mul_const = static_cast<real>(1) / static_cast<real>(rad * 2 + 1);
+  for (int32_t i = 0; i < size; i++) {
+    // Move the current position over one by:
+    // 1. Subtracting off the pixel 1 radius - 1 back.
+    const int32_t iminus = std::max(0, i - rad - 1);
+    val -= src[iminus * stride];
+    // 2. Adding the pixel 1 radius forward.
+    const int32_t iplus = std::min(size - 1, i + rad);
+    val += src[iplus * stride];
+
+    // Now divide by the number of output elements and set the output value.
+    dst[i * stride] = val * mul_const;
+  }
+}
+
+static int tfluids_(Main_rectangularBlur)(lua_State *L) {
+  THTensor* src_tensor =
+      reinterpret_cast<THTensor*>(luaT_checkudata(L, 1, torch_Tensor));
+  const int32_t blur_rad = static_cast<int32_t>(lua_tointeger(L, 2));
+  const bool is_3d = static_cast<bool>(lua_toboolean(L, 3));
+  THTensor* dst_tensor =
+      reinterpret_cast<THTensor*>(luaT_checkudata(L, 4, torch_Tensor));
+  THTensor* tmp_tensor =
+      reinterpret_cast<THTensor*>(luaT_checkudata(L, 5, torch_Tensor));
+
+  if (src_tensor->nDimension != 5 || dst_tensor->nDimension != 5 ||
+      tmp_tensor->nDimension != 5) {
+    luaL_error(L, "ERROR: src and dst must be dim 5");
+  }
+
+  const int32_t bsize = src_tensor->size[0];
+  const int32_t fsize = src_tensor->size[1];
+  const int32_t zsize = src_tensor->size[2];
+  const int32_t ysize = src_tensor->size[3];
+  const int32_t xsize = src_tensor->size[4];
+
+  const int32_t bstride = src_tensor->stride[0];
+  const int32_t fstride = src_tensor->stride[1];
+  const int32_t zstride = src_tensor->stride[2];
+  const int32_t ystride = src_tensor->stride[3];
+  const int32_t xstride = src_tensor->stride[4];
+
+  const real* src = THTensor_(data)(src_tensor);
+  real* dst = THTensor_(data)(dst_tensor);
+  real* tmp = THTensor_(data)(tmp_tensor);
+
+  const real* cur_src = src;
+  real* cur_dst = is_3d ? dst : tmp;
+
+  int32_t b, f, z, y, x;
+  if (is_3d) {
+    // Do the blur in the z-dimension.
+#pragma omp parallel for private(b, f, y, x) collapse(4)
+    for (b = 0; b < bsize; b++) {
+      for (f = 0; f < fsize; f++) {
+        for (y = 0; y < ysize; y++) {
+          for (x = 0; x < xsize; x++) {
+            const real* in = &cur_src[b * bstride + f * fstride + y * ystride +
+                                      x * xstride];
+            real* out = &cur_dst[b * bstride + f * fstride + y * ystride +
+                                 x * xstride];
+            DoRectangularBlurAlongAxis(in, zsize, zstride, blur_rad, out);
+          }
+        }
+      }
+    }
+
+    cur_src = dst;
+    cur_dst = tmp;
+  }
+  // Do the blur in the y-dimension
+#pragma omp parallel for private(b, f, z, x) collapse(4)
+  for (b = 0; b < bsize; b++) {
+    for (f = 0; f < fsize; f++) {
+      for (z = 0; z < zsize; z++) {
+        for (x = 0; x < xsize; x++) {
+          const real* in = &cur_src[b * bstride + f * fstride + z * zstride +
+                                    x * xstride];
+          real* out = &cur_dst[b * bstride + f * fstride + z * zstride +
+                               x * xstride];
+          DoRectangularBlurAlongAxis(in, ysize, ystride, blur_rad, out);
+        }
+      }
+    }
+  }
+
+  cur_src = tmp;
+  cur_dst = dst;
+
+  // Do the blur in the x-dimension
+#pragma omp parallel for private(b, f, z, y) collapse(4)
+  for (b = 0; b < bsize; b++) {
+    for (f = 0; f < fsize; f++) { 
+      for (z = 0; z < zsize; z++) {
+        for (y = 0; y < ysize; y++) { 
+          const real* in = &cur_src[b * bstride + f * fstride + z * zstride +
+                                    y * ystride];
+          real* out = &cur_dst[b * bstride + f * fstride + z * zstride +
+                               y * ystride];
+          DoRectangularBlurAlongAxis(in, xsize, xstride, blur_rad, out);
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+// *****************************************************************************
+// signedDistanceField
+// *****************************************************************************
+
+static int tfluids_(Main_signedDistanceField)(lua_State *L) {
+  THTensor* flag_tensor =
+      reinterpret_cast<THTensor*>(luaT_checkudata(L, 1, torch_Tensor));
+  const int32_t search_rad = static_cast<int32_t>(lua_tointeger(L, 2));
+  const bool is_3d = static_cast<bool>(lua_toboolean(L, 3));
+  THTensor* dst_tensor =
+      reinterpret_cast<THTensor*>(luaT_checkudata(L, 4, torch_Tensor));
+
+  tfluids_(FlagGrid) flags(flag_tensor, is_3d);
+  tfluids_(RealGrid) dst(dst_tensor, is_3d);
+
+  const int32_t bsize = flags.nbatch();
+  const int32_t xsize = flags.xsize();
+  const int32_t ysize = flags.ysize();
+  const int32_t zsize = flags.zsize();
+
+  int32_t b, z, y, x;
+#pragma omp parallel for private(b, z, y, x) collapse(4)
+  for (b = 0; b < bsize; b++) {
+    for (z = 0; z < zsize; z++) {
+      for (y = 0; y < ysize; y++) {
+        for (x = 0; x < xsize; x++) {
+          if (flags.isObstacle(x, y, z, b)) {
+            dst(x, y, z, b) = 0;
+            continue;
+          }
+          real dist_sq = static_cast<real>(search_rad * search_rad);
+          const int32_t zmin = std::max(0, z - search_rad);;
+          const int32_t zmax = std::min(zsize - 1, z + search_rad);
+          const int32_t ymin = std::max(0, y - search_rad);;
+          const int32_t ymax = std::min(ysize - 1, y + search_rad);
+          const int32_t xmin = std::max(0, x - search_rad);;
+          const int32_t xmax = std::min(xsize - 1, x + search_rad);
+          for (int32_t zsearch = zmin; zsearch <= zmax; zsearch++) {
+            for (int32_t ysearch = ymin; ysearch <= ymax; ysearch++) {
+              for (int32_t xsearch = xmin; xsearch <= xmax; xsearch++) {
+                if (flags.isObstacle(xsearch, ysearch, zsearch, b)) {
+                  const real cur_dist_sq = ((z - zsearch) * (z - zsearch) +
+                                            (y - ysearch) * (y - ysearch) +
+                                            (x - xsearch) * (x - xsearch));
+                  if (dist_sq > cur_dist_sq) {
+                    dist_sq = cur_dist_sq;
+                  }
+                }
+              }
+            }
+          }
+          dst(x, y, z, b) = std::sqrt(dist_sq);
+        }
+      }
+    }
+  }
+
+
+  return 0;
+}
+
+// *****************************************************************************
 // solveLinearSystemPCG
 // *****************************************************************************
 
@@ -1660,6 +1848,8 @@ static const struct luaL_Reg tfluids_(Main__) [] = {
    tfluids_(Main_volumetricUpSamplingNearestForward)},
   {"volumetricUpSamplingNearestBackward",
    tfluids_(Main_volumetricUpSamplingNearestBackward)},
+  {"rectangularBlur", tfluids_(Main_rectangularBlur)},
+  {"signedDistanceField", tfluids_(Main_signedDistanceField)},
   {NULL, NULL}  // NOLINT
 };
 

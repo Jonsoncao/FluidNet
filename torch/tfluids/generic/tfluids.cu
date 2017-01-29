@@ -1614,6 +1614,67 @@ static int tfluids_CudaMain_volumetricUpSamplingNearestBackward(lua_State *L) {
   return 0;
 }
 
+// *****************************************************************************
+// signedDistanceField
+// *****************************************************************************
+
+__global__ void signedDistanceField(
+    CudaFlagGrid flags, const int search_rad, CudaRealGrid dst) {
+  int b, chan, z, y, x;
+  if (GetKernelIndices(flags, b, chan, z, y, x)) {
+    return;
+  }
+
+  if (flags.isObstacle(x, y, z, b)) {
+    dst(x, y, z, b) = 0;
+  }
+
+  float dist_sq = static_cast<float>(search_rad * search_rad);
+  const int zmin = max(0, z - search_rad);;
+  const int zmax = min((int)flags.zsize() - 1, z + search_rad);
+  const int ymin = max(0, y - search_rad);;
+  const int ymax = min((int)flags.ysize() - 1, y + search_rad);
+  const int xmin = max(0, x - search_rad);;
+  const int xmax = min((int)flags.xsize() - 1, x + search_rad);
+  for (int zsearch = zmin; zsearch <= zmax; zsearch++) {
+    for (int ysearch = ymin; ysearch <= ymax; ysearch++) {
+      for (int xsearch = xmin; xsearch <= xmax; xsearch++) {
+        if (flags.isObstacle(xsearch, ysearch, zsearch, b)) {
+          const float cur_dist_sq = ((z - zsearch) * (z - zsearch) +
+                                     (y - ysearch) * (y - ysearch) +
+                                     (x - xsearch) * (x - xsearch));
+          if (dist_sq > cur_dist_sq) {
+            dist_sq = cur_dist_sq;
+          }
+        }
+      }
+    }
+  }
+  dst(x, y, z, b) = sqrt(dist_sq);
+}
+
+static int tfluids_CudaMain_signedDistanceField(lua_State *L) {
+  THCState* state = cutorch_getstate(L);
+
+  // Get the args from the lua stack. NOTE: We do ALL arguments (size checking)
+  // on the lua stack.
+  THCudaTensor* tensor_flags = reinterpret_cast<THCudaTensor*>(
+      luaT_checkudata(L, 1, "torch.CudaTensor"));
+  const int32_t search_rad = static_cast<int32_t>(lua_tointeger(L, 2));
+  const bool is_3d = static_cast<bool>(lua_toboolean(L, 3));
+  THCudaTensor* tensor_dst = reinterpret_cast<THCudaTensor*>(
+      luaT_checkudata(L, 4, "torch.CudaTensor"));
+
+  CudaFlagGrid flags = toCudaFlagGrid(state, tensor_flags, is_3d);
+  CudaRealGrid dst = toCudaRealGrid(state, tensor_dst, is_3d);
+
+  // LaunchKernel args: lua_State, func, domain, args...
+  LaunchKernel(L, &signedDistanceField, flags,
+               flags, search_rad, dst);
+
+  return 0;
+}
+
 //******************************************************************************
 // solveLinearSystemPCG
 //******************************************************************************
@@ -1646,6 +1707,7 @@ static const struct luaL_Reg tfluids_CudaMain__ [] = {
    tfluids_CudaMain_volumetricUpSamplingNearestForward},
   {"volumetricUpSamplingNearestBackward",
    tfluids_CudaMain_volumetricUpSamplingNearestBackward},
+  {"signedDistanceField", tfluids_CudaMain_signedDistanceField},
   {NULL, NULL}  // NOLINT
 };
 

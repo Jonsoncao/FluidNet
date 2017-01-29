@@ -156,7 +156,7 @@ local flagsToOccupancyNet = tfluids.FlagsToOccupancy():cuda()
 
 -- Remove buoyancy for this demo (can be toggled on later).
 mconf.buoyancyScale = 0
-mconf.vorticityConfinement = 0
+mconf.vorticityConfinementAmp = 0
 mconf.dt = 4 / 60
 
 -- ******************************** OpenGL Funcs *******************************
@@ -215,13 +215,11 @@ function tfluids.keyboardFunc(key, x, y)
     print("Re-Loading Data!")
     tfluids.loadData()
   elseif key == 99 then  -- 'c'
-    mconf.vorticityConfinementAmp = mconf.vorticityConfinementAmp +
-        tfluids.getDx(batchCPU.flags)
+    mconf.vorticityConfinementAmp = mconf.vorticityConfinementAmp + 0.25
     print("mconf.vorticityConfinementAmp = " .. mconf.vorticityConfinementAmp)
   elseif key == 120 then -- 'x'
     mconf.vorticityConfinementAmp =
-        math.max(mconf.vorticityConfinementAmp - tfluids.getDx(batchCPU.flags), 
-                 0)
+        math.max(mconf.vorticityConfinementAmp - 0.25, 0)
     print("mconf.vorticityConfinementAmp = " .. mconf.vorticityConfinementAmp)
   elseif key == 97 then  -- 'a'
     if mconf.advectionMethod == 'maccormack' then
@@ -243,13 +241,12 @@ function tfluids.keyboardFunc(key, x, y)
       tfluids.removeBCs(batchGPU)
       print('Plume BCs OFF')
     else
-      local color = colors[curColor + 1]
+      curColor = math.mod(curColor + 1, numColors)
+      local densityVal = colors[curColor]
       local uScale = 10
       local rad = 0.05  -- Fraction of xdim
-      error('This is not working for now')
-      tfluids.createPlumeBCs(batchGPU, color, uScale, rad)
+      tfluids.createPlumeBCs(batchGPU, densityVal, uScale, rad)
       print('Plume BCs ON')
-      curColor = math.mod(curColor + 1, numColors)
     end
   elseif key == 110 then  -- 'n'
     if mconf.buoyancyScale == 0 then

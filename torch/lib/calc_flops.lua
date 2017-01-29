@@ -276,6 +276,12 @@ function torch.CalculateFlops(module, input, verbose, depth)
   elseif moduleType == 'nn.Mul' then
     flops = 1 * inputNumel
     peakMemory = inputNumel + outputNumel
+  elseif moduleType == 'nn.VolumetricAveragePooling' then
+    flops = outputNumel * module.kW * module.kH * module.kT
+    peakMemory = inputNumel + outputNumel
+  elseif moduleType == 'tfluids.VolumetricUpSamplingNearest' then
+    flops = 0  -- Just a copy.
+    peakMemory = inputNumel + outputNumel
   else
     error('Module type ' .. moduleType .. ' is not supported')
   end

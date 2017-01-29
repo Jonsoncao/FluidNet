@@ -45,10 +45,10 @@ function torch.defaultConf()
       -- advectionMethod: options are 'euler', 'maccormack'
       advectionMethod = 'maccormack',
       banksJoinStage = 3,  -- Join BEFORE this stage.
-      banksAggregateMethod = 'add',  -- options are 'concat' and 'add'
+      banksAggregateMethod = 'concat',  -- options are 'concat' and 'add'
       banksNum = 1,  -- Number of parallel resolution banks (1 == disable).
       banksSplitStage = 1,  -- Split BEFORE this stage.
-      banksWeightShare = true,
+      banksWeightShare = false,
       batchNormAffine = true,  -- ignored if addBatchNorm == false.
       batchNormEps = 1e-4,  -- ignored if addBatchNorm == false.
       batchNormMom = 0.1,  -- ignored if addBatchNorm == false.
@@ -70,7 +70,8 @@ function torch.defaultConf()
         UDiv = false,
       },
       lossFunc = 'fluid',  -- Only fluid is supported for now.
-      lossFuncScaleInvariant = false,  -- If true then use Eigen's scale inv MSE
+      lossFuncBorderWeight = 1,  -- 1 == disabled.
+      lossFuncBorderWidth = 3,  -- We linearly ramp from 1 to weight.
       lossPLambda = 0,
       lossULambda = 0,
       lossDivLambda = 1,

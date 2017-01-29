@@ -14,8 +14,6 @@
 
 // This is a very, very barebones replication of the Manta grids. It's just
 // so that we can more easily transfer KERNEL functions across.
-// NOTE: THERE ARE NO CUDA IMPLEMENTATIONS OF THESE. You will need to replicate
-// functionally any methods here as flat cuda functions.
 
 #include <iostream>
 #include <sstream>

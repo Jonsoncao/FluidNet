@@ -12,8 +12,11 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
-local cutorch = require('cutorch')
 local torch = require('torch')
+local ok, cutorch = pcall(require, 'cutorch')
+if not ok then
+  print('WARNING: Couldnt load cutorch, CUDA functionality may not work.')
+end
 local tfluids = require('libtfluids')
 
 tfluids._tmp = {}  -- We'll allocate temporary arrays in here.
@@ -502,6 +505,44 @@ local function flagsToOccupancy(flags, occupancy)
   flags.tfluids.flagsToOccupancy(flags, occupancy)
 end
 rawset(tfluids, 'flagsToOccupancy', flagsToOccupancy)
+
+-- rectangularBlur - A fast impulse based rectangular blur method. It is O(n)
+-- where n is the number of pixels and has runtime independent of the kernel
+-- size.
+--
+-- Works on 3D or 2D grids.
+local function rectangularBlur(src, blurRad, is3D, dst)
+  assert(src:dim() == 5 and dst:dim() == 5)
+  assert(src:isSameSizeAs(dst))
+  assert(blurRad > 0 and math.floor(blurRad) == blurRad,
+         'blurRad must be a positive, non-zero integer')
+  assert(src:isContiguous() and dst:isContiguous())
+
+  -- We need a temp buffer so we don't destroy src (we do separable
+  -- convolutions so we need an intermediate buffer).
+  local tmp = getTempStorage(src:type(), {src:size():totable()})[1]
+
+  dst.tfluids.rectangularBlur(src, blurRad, is3D, dst, tmp)
+end
+rawset(tfluids, 'rectangularBlur', rectangularBlur)
+
+-- signedDistanceField calculates the signed distance field of the input image.
+-- NOTE: This is NOT a linear time signed distance transform. It is O(pix * 
+-- searchRad^n). We simply look in a local window for obstacle cells and collect
+-- the min distance. All distances above searchRad are clamped (to searchRad).
+--
+-- Works on 3D or 2D grids.
+local function signedDistanceField(flags, searchRad, is3D, dst)
+  assert(flags:dim() == 5 and dst:dim() == 5)
+  assert(flags:isSameSizeAs(dst))
+  assert(flags:isContiguous() and dst:isContiguous())
+  assert(flags:size(2) == 1, 'flags must be scalar')
+  assert(searchRad > 0 and math.floor(searchRad) == searchRad,
+         'searchRad must be a positive, non-zero integer')
+
+  dst.tfluids.signedDistanceField(flags, searchRad, is3D, dst)
+end
+rawset(tfluids, 'signedDistanceField', signedDistanceField)
 
 -- volumetricUpSamplingNearestForward - This lua interface is just for testing.
 -- you should use the Module.

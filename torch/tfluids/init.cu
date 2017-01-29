@@ -19,7 +19,9 @@
 #include <TH.h>
 #include <luaT.h>
 #include "generic/cell_type.h"
-#include "generic/tfluids.cu.h"
+#ifndef BUILD_WITHOUT_CUDA_FUNCS
+  #include "generic/tfluids.cu.h"
+#endif
 #include "generic/stack_trace.cc"
 
 // This type is common to both float and double implementations and so has
@@ -66,9 +68,9 @@ inline int32_t clamp(const int32_t x, const int32_t low, const int32_t high) {
 
 #undef TH_GENERIC_FILE
 
-// setfieldint pushes the index and the field value on the stack, and then calls
-// lua_settable. The setfield function assumes that before the call the table
-// is at the top of the stack (index -1).
+// setfieldint pushes the index and the field value on the stack, and then
+// calls lua_settable. The setfield function assumes that before the call the
+// table is at the top of the stack (index -1).
 void setfieldint(lua_State* L, const char* index, int value) {
   lua_pushstring(L, index);
   lua_pushnumber(L, value);
@@ -78,7 +80,9 @@ void setfieldint(lua_State* L, const char* index, int value) {
 LUA_EXTERNC DLL_EXPORT int luaopen_libtfluids(lua_State *L) {
   tfluids_FloatMain_init(L);
   tfluids_DoubleMain_init(L);
+#ifndef BUILD_WITHOUT_CUDA_FUNCS
   tfluids_CudaMain_init(L);
+#endif
 
   lua_newtable(L);
   lua_pushvalue(L, -1);
@@ -92,9 +96,11 @@ LUA_EXTERNC DLL_EXPORT int luaopen_libtfluids(lua_State *L) {
   luaT_setfuncs(L, tfluids_FloatMain__, 0);
   lua_setfield(L, -2, "float");
 
+#ifndef BUILD_WITHOUT_CUDA_FUNCS
   lua_newtable(L);
   luaT_setfuncs(L, tfluids_CudaMain_getMethodsTable(), 0);
   lua_setfield(L, -2, "cuda");
+#endif
 
   // Create the CellType enum table.
   lua_newtable(L);
@@ -109,6 +115,14 @@ LUA_EXTERNC DLL_EXPORT int luaopen_libtfluids(lua_State *L) {
   setfieldint(L, "TypeReserved", TypeReserved);
   setfieldint(L, "TypeZeroPressure", TypeZeroPressure);
   lua_setfield(L, -2, "CellType");
+
+#ifndef BUILD_WITHOUT_CUDA_FUNCS
+  lua_pushboolean(L, true);
+#else
+  std::cout << "WARNING: tfluids compiled without CUDA." << std::endl;
+  lua_pushboolean(L, false);
+#endif
+  lua_setfield(L, -2, "withCUDA");
 
   return 1;
 }

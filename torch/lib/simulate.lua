@@ -40,7 +40,7 @@ function tfluids.removeBCs(batch)
   collectgarbage()
 end
 
---- @param densityVal: table of scalar values of size density:size(2) (i.e. the
+--- @param densityVal: table of scalar values of size #density (i.e. the
 --- color to set the density field). (if greyscale set to '{value}')
 -- @param uScale: scalar value which sets the size of the velocity.
 -- @param rad: fraction of xdim.
@@ -54,8 +54,22 @@ function tfluids.createPlumeBCs(batch, densityVal, uScale, rad)
   batch.UBCInvMask = batch.UBC:clone():fill(1)
   assert(batch.density ~= nil,
          'plume BCs require a density field to be specified')
-  batch.densityBC = batch.density:clone():fill(0)
-  batch.densityBCInvMask = batch.density:clone():fill(1)
+  assert(torch.type(densityVal) == 'table')
+  if torch.isTensor(batch.density) then
+    batch.densityBC = batch.density:clone():fill(0)
+    batch.densityBCInvMask = batch.density:clone():fill(1)
+    assert(#densityVal == 1, 'there should be a single density value')
+  else
+    assert(torch.type(batch.density) == 'table',
+           'density should be either a table or tensor.')
+    batch.densityBC = {}
+    batch.densityBCInvMask = {}
+    assert(#densityVal == #batch.density, 'Need a density val per channel')
+    for i = 1, #batch.density do
+      batch.densityBC[i] = batch.density[i]:clone():fill(0)
+      batch.densityBCInvMask[i] = batch.density[i]:clone():fill(1)
+    end
+  end
 
   assert(batch.UBC:dim() == 5)
   assert(batch.UBC:size(1) == 1, 'Only single batch allowed.')
@@ -79,9 +93,6 @@ function tfluids.createPlumeBCs(batch, densityVal, uScale, rad)
     vec = torch.Tensor({0, 1, 0}):typeAs(batch.UBC)
   end
   vec:mul(uScale)
-  densityVal = torch.Tensor({densityVal}):typeAs(batch.densityBC)
-  assert(densityVal:size(1) == batch.densityBC:size(2),
-         'Incorrect density specifier length')
   for z = 1, zdim do
     for y = 1, 4 do
       for x = 1, xdim do
@@ -91,8 +102,15 @@ function tfluids.createPlumeBCs(batch, densityVal, uScale, rad)
           -- In the plume. Set the BCs.
           batch.UBC[{1, {}, z, y, x}]:copy(vec)
           batch.UBCInvMask[{1, {}, z, y, x}]:fill(0)
-          batch.densityBC[{1, {}, z, y, x}]:copy(densityVal)
-          batch.densityBCInvMask[{1, {}, z, y, x}]:fill(0)
+          if torch.isTensor(batch.density) then
+            batch.densityBC[{1, {}, z, y, x}]:fill(densityVal[1])
+            batch.densityBCInvMask[{1, {}, z, y, x}]:fill(0)
+          else
+            for i = 1, #batch.density do
+              batch.densityBC[i][{1, {}, z, y, x}]:fill(densityVal[i])
+              batch.densityBCInvMask[i][{1, {}, z, y, x}]:fill(0)
+            end
+          end
         else
           -- Outside the plume explicitly set the velocity to zero and leave
           -- the density alone.
@@ -126,8 +144,18 @@ local function setConstVals(batch, p, U, flags, density)
     U:add(batch.UBC)
   end
   if batch.densityBC ~= nil or batch.densityBCInvMask ~= nil then
-    density:cmul(batch.densityBCInvMask)
-    density:add(batch.densityBC)
+    assert(torch.type(density) == torch.type(batch.densityBC))
+    if torch.isTensor(density) then
+      density:cmul(batch.densityBCInvMask)
+      density:add(batch.densityBC)
+    else
+      assert(torch.type(batch.density) == 'table')
+      assert(#density == #batch.densityBC)
+      for i = 1, #density do
+        density[i]:cmul(batch.densityBCInvMask[i])
+        density[i]:add(batch.densityBC[i])
+      end
+    end
   end
 end
 
@@ -172,7 +200,7 @@ function tfluids.simulate(conf, mconf, batch, model, outputDiv)
   -- Add external forces (buoyancy and gravity).
   if density ~= nil and mconf.buoyancyScale > 0 then
     local gravity = U:new():resize(3)
-    gravity[1] = (-tfluids.getDx(flags) / 4) * mconf.buoyancyScale
+    gravity[2] = (-tfluids.getDx(flags) / 4) * mconf.buoyancyScale
     if type(density) == 'table' then
       -- Just use the first channel (TODO(tompson): average the channels)
       tfluids.addBuoyancy(U, flags, density[1], gravity, mconf.dt)
@@ -185,6 +213,7 @@ function tfluids.simulate(conf, mconf, batch, model, outputDiv)
 
   -- Add vorticity confinement.
   if mconf.vorticityConfinementAmp > 0 then
+    local amp = tfluids.getDx(flags) * mconf.vorticityConfinementAmp
     tfluids.vorticityConfinement(U, flags, mconf.vorticityConfinementAmp)
   end
 

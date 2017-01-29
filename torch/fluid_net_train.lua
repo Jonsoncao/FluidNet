@@ -74,7 +74,7 @@ local criterion
 if mconf.lossFunc == 'fluid' then
   criterion = nn.FluidCriterion(
       mconf.lossPLambda, mconf.lossULambda, mconf.lossDivLambda,
-      mconf.lossFuncScaleInvariant)
+      mconf.lossFuncBorderWeight, mconf.lossFuncBorderWidth)
 else
   error('Incorrect lossFunc value.')
 end

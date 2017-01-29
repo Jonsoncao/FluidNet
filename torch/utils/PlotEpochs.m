@@ -26,7 +26,7 @@ if nargin < 1
   clc;
   
   % User will select models.
-  path = '../../data/models/';
+  path = '../../data/models/2017_01_26/';
 
   files = dir([path, '/*_log.txt']);
   files = {files.name};

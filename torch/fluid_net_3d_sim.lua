@@ -23,6 +23,10 @@
 --
 -- The output is a sequence of .vbox files in the CNNFluids/blender folder.
 -- These files are then loaded into blender for rendering.
+--
+-- Typical useage:
+-- qlua fluid_net_3d_sim.lua -modelFilename myModel -loadVoxelModel arc \
+--                           -visualizeData true -saveData true
 
 local tfluids = require('tfluids')
 local paths = require('paths')
@@ -48,8 +52,6 @@ print(cutorch.getDeviceProperties(conf.gpu))
 -- ***************************** Create the model ******************************
 conf.modelDirname = conf.modelDir .. '/' .. conf.modelFilename
 local mconf, model = torch.loadModel(conf.modelDirname)
-mconf.vorticityConfinementAmp = 0.8
-mconf.buoyancyScale = 1
 model:cuda()
 print('==> Loaded model from: ' .. conf.modelDirname)
 torch.setDropoutTrain(model, false)
@@ -67,6 +69,16 @@ local batchCPU = {
     density = torch.FloatTensor(conf.batchSize, 1, res, res, res):fill(0)
 }
 print("running simulation at resolution " .. res .. "^3")
+
+-- **************** Set some nice looking simulation variables  ****************
+mconf.vortictyConfinementAmp = 0.0
+mconf.buoyancyScale = 2.0
+mconf.dt = 0.1
+local plumeScale = 1.0
+local numFrames = 768
+local outputDecimation = 3
+mconf.advectionMethod = 'maccormack'  -- options are 'euler', 'maccormack'
+
 -- *************************** Load a model into flags *************************
 local voxels = {}
 local outDir
@@ -91,9 +103,10 @@ if conf.loadVoxelModel ~= "none" then
   voxels.min = bb.min
   voxels.max = bb.max
 
-  error('TODO(tompson): This needs updating after switch to flags.')
-
-  batchCPU.flags[{{},1}] = voxels.data:view(1, res, res, res)
+  -- We need to turn the occupancy grid {0, 1} into a proper flags grid.
+  local occ = voxels.data:view(1, 1, res, res, res)
+  batchCPU.flags:copy((occ * tfluids.CellType.TypeObstacle) +
+                      ((1 - occ) * tfluids.CellType.TypeFluid))
 else
   outDir = '../blender/mushroom_cloud_render/'
 end
@@ -103,10 +116,8 @@ for key, value in pairs(batchCPU) do
   batchGPU[key] = value:cuda()
 end
 local frameCounter = 1
-local simulationTimeSec = 102.4
-local outputDecimation = 4  -- Set to 1 to disable. Output every 4 frames.
 
-local numFrames = simulationTimeSec / mconf.dt
+local simulationTimeSec = numFrames * mconf.dt
 print('Simulating with dt = ' .. mconf.dt)
 print('Saving ever ' .. outputDecimation .. ' frames')
 print('Simulating for ' .. numFrames .. ' frames (' .. simulationTimeSec ..
@@ -114,10 +125,9 @@ print('Simulating for ' .. numFrames .. ' frames (' .. simulationTimeSec ..
 
 -- ****************************** DATA FUNCTIONS *******************************
 -- Set up a plume boundary condition.
-local color = {1}
-local uScale = 1  -- 0 turns it off and will only use buoyancy.
+local densityVal = {1}
 local rad = 0.15
-tfluids.createPlumeBCs(batchGPU, color, uScale, rad)
+tfluids.createPlumeBCs(batchGPU, densityVal, plumeScale, rad)
 
 -- ***************************** Create Voxel File ****************************
 local densityFile, densityFilename, obstaclesFile, obstaclesFilename
@@ -131,8 +141,7 @@ if conf.saveData then
   densityFile:writeInt(res)
   densityFile:writeInt(numFrames)
   
-  obstaclesFilename = (outDir .. '/geom_output_' .. conf.modelFilename ..
-                       '_dt' .. mconf.dt .. '.vbox')
+  obstaclesFilename = (outDir .. '/geom_output.vbox')
   obstaclesFile = torch.DiskFile(obstaclesFilename,'w')
   obstaclesFile:binary()
   obstaclesFile:writeInt(res)
@@ -141,12 +150,23 @@ if conf.saveData then
   obstaclesFile:writeInt(1)
 end
 
+local divNet = tfluids.VelocityDivergence():cuda()
+
 local hImage
 if conf.visualizeData then
+  local _, U, flags, _ = tfluids.getPUFlagsDensityReference(batchGPU)
+
+  local div = divNet:forward({U, flags})
+  div = div:squeeze():mean(1):squeeze()  -- Mean along z-channel.
+
   local density = batchGPU.density:mean(2):squeeze()
   density = density:mean(1):squeeze()  -- Average along Z dimension.
-  hImage = image.display{image = density, zoom = 512 / density:size(1),
-                         gui = false, legend = 'density'}
+
+  local sz = {1, div:size(1), div:size(2)}
+  local im = torch.cat(div:view(unpack(sz)), density:view(unpack(sz)), 1)
+  hImage = image.display{image = im, zoom = 512 / density:size(1),
+                         gui = false, legend = 'divergence & density',
+                         padding = 2}
 end
 
 -- ***************************** SIMULATION LOOP *******************************
@@ -182,10 +202,19 @@ for i = 1, numFrames do
   end
 
   if conf.visualizeData then
-    local density = batchGPU.density:mean(2):squeeze()
-    density = density:mean(1):squeeze():sqrt()
-    image.display{image = density, zoom = 512 / density:size(1),
-                  gui = false, legend = 'density', win = hImage}
+    -- This is SUPER slow. We're pulling off the GPU and then sending it back
+    -- as an image.display call. It probably limits framerate.
+    local div = divNet:forward({U, flags})
+    div = div:squeeze():mean(1):squeeze()  -- Mean along z-channel.
+
+    local density = batchGPU.density:mean(2):squeeze()  -- Mean of RGB
+    density = density:mean(1):squeeze():sqrt()  -- Mean along z-channel.
+
+    local sz = {1, div:size(1), div:size(2)}
+    local im = torch.cat(div:view(unpack(sz)), density:view(unpack(sz)), 1)
+    image.display{image = im, zoom = 512 / density:size(1),
+                  gui = false, legend = 'divergence & density', win = hImage,
+                  padding = 2}
   end
 end
 
